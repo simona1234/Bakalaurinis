@@ -1,0 +1,343 @@
+---
+title: "Bachelor Thesis"
+author: "Simona Gritytė"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE, warning = FALSE}
+library(lubridate)
+library(dplyr)
+library(readxl)
+library(tidyr)
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+library(gridExtra)
+```
+
+## Read and tidy data
+
+```{r, warning = FALSE}
+# EUR / USD
+eurusd <- read.csv("EURUSD.csv", stringsAsFactors = FALSE)
+eurusd[, 1] <- ymd_hms(eurusd[, 1])
+eurusd <- eurusd %>%
+  select(Date = Time..UTC., Open) %>%
+  mutate(Return = log(lead(Open) / Open) * 100)
+
+# Grafikai
+g1 <- ggplot(eurusd, aes(x = as.Date(Date), y = Open)) +
+  geom_line() +
+  labs(y = "EUR/USD", x = "Metai") +
+  theme_bw() +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y")
+
+g2 <- ggplot(eurusd, aes(x = as.Date(Date), y = Return)) +
+  geom_line() +
+  labs(y = "Gr\u0105ža %", x = "Metai") +
+  theme_bw() +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y")
+
+# png("Plot1.png", width = 6, height = 3, units = 'in', res = 300)
+grid.arrange(g1, g2)
+# dev.off()
+
+# US Nonfarm payroll employment
+USemployment <- read_excel("USNonfarmPayroll.xlsx")
+# German unemployment rate
+EUemployment <- read_excel("GermanUnemploymentChange.xlsx")
+# US GDP advance
+USgrowth <- read_excel("USGDPadvance.xlsx")
+# German preliminary GDP
+EUgrowth <- read_excel("GermanGDPpreliminary.xlsx")
+# US core CPI
+USinflation <- read_excel("UScoreCPI.xlsx")
+# German preliminary CPI
+EUinflation <- read_excel("GermanCPIpreliminary.xlsx")
+# US trade balance
+USnetexports <- read_excel("USTradeBalance.xlsx")
+# German trade balance
+EUnetexports <- read_excel("GermanTradeBalance.xlsx")
+# US retail sales
+USsales <- read_excel("USRetailSalesAdvance.xlsx")
+# EU retail sales
+EUsales <- read_excel("EURetailSales.xlsx")
+
+# Clean events data
+cleanData <- function(df) {
+  if(class(df$Time) == "character") {
+    df <- df %>%
+      rename(Date = `Release Date`) %>%
+      mutate(Date = ymd_hm(paste(Date, trimws(Time)))) %>%
+      select(-Time) %>%
+      mutate(Surprise = (Actual - Forecast)/sd(Actual - Forecast))
+  } else {
+    df <- df %>%
+      rename(Date = `Release Date`) %>%
+      mutate(Time = substr(as.character(Time), start = 12, stop = 19)) %>%
+      mutate(Date = ymd_hms(paste(Date, Time))) %>%
+      select(-Time) %>%
+      mutate(Surprise = (Actual - Forecast)/sd(Actual - Forecast))
+  }
+  return(df)
+}
+
+USemployment <- cleanData(USemployment)
+EUemployment <- cleanData(EUemployment)
+USgrowth <- cleanData(USgrowth)
+EUgrowth <- cleanData(EUgrowth)
+USinflation <- cleanData(USinflation)
+EUinflation <- cleanData(EUinflation)
+USnetexports <- cleanData(USnetexports)
+EUnetexports <- cleanData(EUnetexports)
+USsales <- cleanData(USsales)
+EUsales <- cleanData(EUsales)
+
+events <- rbind(USemployment, EUemployment,
+                USgrowth, EUgrowth,
+                USinflation, EUinflation,
+                USnetexports, EUnetexports,
+                USsales, EUsales)
+events <- events %>%
+  arrange(Date) %>%
+  filter(Date < ymd_hms("2019-03-01 00:00:00"))
+
+# remove no longer needed data
+rm(USemployment, EUemployment,
+   USgrowth, EUgrowth,
+   USinflation, EUinflation,
+   USnetexports, EUnetexports,
+   USsales, EUsales)
+```
+
+## Remove confounding events
+
+```{r}
+# Remove confounding events (if there is less than a 1.5 hour time span)
+
+# If released at the same time, consider them only if they do not
+# contain contradictory infomation
+
+# If one event surprise is 0, remove it
+
+# If at different time, consider only the first one
+
+# Events to remove are selected manually
+
+ind <- which(diff(events$Date)/60/60 <= 1.5)
+events$Row <- 1:nrow(events)
+
+events$Show <- rep(0, nrow(events))
+events$Show[ind] <- 1
+events$Show[ind+1] <- 1
+
+events %>%
+  filter(Show == 1)
+
+remove <- c(6, 87, 126, 127, 146, 165, 180, 181, 237, 238, 295, 302, 322, 333,
+            334, 373, 400, 411, 412, 437, 438, 450, 478, 504, 515,
+            516, 541, 542, 555, 567, 568, 578, 584, 585, 592, 593,
+            607, 609, 610, 718, 735, 744, 745, 792, 793, 809, 810, 817, 818)
+
+events <- events[-remove, ]
+
+events$Row <- NULL
+events$Show <- NULL
+```
+
+## Pre-event and event Windows
+
+```{r}
+eurusd$PreEvent <- rep(0, nrow(eurusd))
+eurusd$Event <- rep(0, nrow(eurusd))
+for(i in 1:nrow(events)) {
+  ind_pre <- which(eurusd$Date <= events$Date[i] - 6*60 &
+                   eurusd$Date >= events$Date[i] - 135*60)
+  ind_ev <- which(eurusd$Date <= events$Date[i] + 20*60 &
+                  eurusd$Date >= events$Date[i] - 5*60)
+  eurusd$PreEvent[ind_pre] <- 1
+  eurusd$Event[ind_ev] <- 1
+}
+
+eurusd <- eurusd %>%
+  filter(PreEvent == 1 | Event == 1)
+```
+
+## Data analysis
+
+```{r}
+# Estimate "normal" returns
+pre_event <- eurusd %>%
+  filter(PreEvent == 1) %>%
+  mutate(Event = rep(unique(events$Date), each = 130)) %>%
+  group_by(Event) %>%
+  summarise(NormalReturn = mean(Return),
+            SdAR = sd(Return - mean(Return)))
+
+events <- left_join(events, pre_event, by = c("Date" = "Event"))
+
+# Get returns
+returns <- eurusd %>%
+  mutate(Event = rep(unique(events$Date), each = 156),
+         Minute = rep(-135:20, times = length(unique(events$Date)))) %>%
+  select(Event, Minute, Return)
+
+returns <- left_join(returns, pre_event, by = "Event")
+
+# Abnormal returns
+returns <- returns %>%
+  mutate(AR = Return - NormalReturn)
+
+# Standardized abnormal returns
+returns <- returns %>%
+  mutate(SAR = AR / SdAR)
+
+# Data for further use
+mydata <- events %>%
+  select(Date, Surprise, Source, Category) %>%
+  left_join(returns, ., by = c("Event" = "Date")) %>%
+  mutate(Type = ifelse(
+    (Surprise > 0.1 & Category %in% c("Growth", "Inflation", "Net exports", "Sales")) |
+    (Surprise > 0.1 & Category == "Employment" & Source == "US") |
+    (Surprise < -0.1 & Category == "Employment" & Source == "EU"), "Good",
+    ifelse(Surprise <= 0.1 & Surprise >= -0.1, "Neutral", "Bad")))
+```
+
+## Test the significance of abnormal returns
+
+```{r}
+# Select Source, Category and Type of interest
+df <- mydata %>%
+  filter(Source == "US" & Category == "Employment", Type == "Good")
+
+# Adjust SAR
+df <- df %>%
+  group_by(Minute) %>%
+  summarise(SdSAR = sd(SAR)) %>%
+  mutate(SdSAR = ifelse(Minute < 0, 1, SdSAR)) %>%
+  left_join(df, ., by = "Minute") %>%
+  mutate(SARadj = SAR / SdSAR)
+
+MeanAR <- df %>%
+  group_by(Minute) %>%
+  # multiply by 100 for convenience when printing table
+  summarise(MeanAR = mean(AR)*100) %>%
+  filter(Minute >= -5) %>%
+  select(MeanAR) %>%
+  unlist() %>%
+  as.numeric()
+
+# Corrado-Zivney statistic
+CZ <- NULL
+t0 <- -5:20
+
+# for each minute in event window
+for(i in 1:length(t0)) {
+  # get all adjusted SAR for that minute
+  SARt0 <- df %>%
+    filter(Minute == t0[i]) %>%
+    select(SARadj) %>%
+    unlist() %>%
+    as.numeric()
+  
+  ranks <- NULL
+  # for each event
+  for(j in 1:length(unique(df$Event))) {
+    # get pre-event SAR for that event
+    SARadj <- df %>%
+      filter(Event == unique(df$Event)[j] & Minute <= -6) %>%
+      select(SARadj) %>%
+      unlist() %>%
+      as.numeric()
+    # find rank of SAR for that event for that minute
+    ranks[j] <- rank(c(SARadj, SARt0[j]))[131]
+  }
+  # compute CZ statistic for that minute 
+  CZ[i] <- sum((ranks - 131/2) / sqrt(130*131/12)) /
+    sqrt(length(unique(df$Event)))  
+}
+
+# Number of events in that group
+length(unique(df$Event))
+# Significance table
+data.frame(Minute = -5:20, AR = MeanAR, CZ = CZ, pvalue = 2*pnorm(-abs(CZ))) %>%
+  mutate(Significance = ifelse(pvalue < 0.01, "***",
+                               ifelse(pvalue < 0.05, "**",
+                                      ifelse(pvalue < 0.1, "*", ""))))
+```
+
+## Cumulative Abnormal Returns
+
+```{r}
+# Event window CARs
+CARs <- mydata %>%
+  filter(Minute >= -5) %>%
+  group_by(Source, Type, Minute) %>%
+  summarise(MeanAR = mean(AR)) %>%
+  mutate(CAR = cumsum(MeanAR))
+
+g1 <- CARs %>%
+  filter(Source == "EU") %>%
+  ggplot(aes(x = Minute, y = CAR, linetype = Type)) +
+    geom_line() +
+    labs(y = "CAR (%)", x = "Minut\u0117", title = "ES") +
+    scale_linetype_discrete(name = "Naujiena", labels = c("Bloga", "Gera", "Neutrali")) +
+    theme_bw()
+
+g2 <- CARs %>%
+  filter(Source == "US") %>%
+  ggplot(aes(x = Minute, y = CAR, linetype = Type)) +
+    geom_line() +
+    labs(y = "CAR (%)", x = "Minut\u0117", title = "JAV") +
+    scale_linetype_discrete(name = "Naujiena", labels = c("Bloga", "Gera", "Neutrali")) +
+    theme_bw()
+
+# png("Plot2.png", width = 6, height = 3, units = 'in', res = 300)
+grid.arrange(g1, g2)
+# dev.off()
+```
+
+# Regression Analysis
+
+```{r, warning = FALSE}
+# Read in data for proxy variables
+unemployment <- read_excel("unemployment_rate.xlsx")
+earnings <- read_excel("earnings_change.xlsx")
+unemployment <- cleanData(unemployment) %>%
+  select(Date, Unemployment = Actual)
+earnings <- cleanData(earnings) %>%
+  select(Date, Earnings = Actual)
+
+# Calculate CARs For Nonfarm Payroll events after announcement
+NFP_CAR <- mydata %>%
+  filter(Source == "US" & Category == "Employment" & Minute >= 0) %>%
+  group_by(Event) %>%
+  summarise(Surprise = max(Surprise),
+            Type = factor(sample(Type, 1)),
+            CAR = sum(AR)) %>%
+  left_join(unemployment, by = c("Event" = "Date")) %>%
+  left_join(earnings, by = c("Event" = "Date"))
+
+NFP_CAR <- events %>%
+  filter(Source == "US" & Category == "Employment") %>%
+  mutate(RealSurprise = Actual - Forecast) %>%
+  select(Date, RealSurprise) %>%
+  left_join(NFP_CAR, ., by = c("Event" = "Date"))
+
+mod1 <- lm(CAR ~ RealSurprise, data = NFP_CAR)
+summary(mod1)
+mod2 <- lm(CAR ~ RealSurprise + Unemployment + Earnings, data = NFP_CAR)
+summary(mod2)
+mod3 <- rpart(CAR ~ RealSurprise + Unemployment + Earnings, data = NFP_CAR)
+# png("Tree.png", width = 6, height = 3, units = 'in', res = 300)
+rpart.plot(mod3, type = 5, box.palette = 0)
+# dev.off()
+
+# R-squared of tree model
+tmp <- printcp(mod3)
+1-tmp[6, 3]
+```
